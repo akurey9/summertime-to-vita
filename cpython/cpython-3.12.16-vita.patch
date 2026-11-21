@@ -1,0 +1,1689 @@
+diff --git a/Include/Python.h b/Include/Python.h
+index 5eddda6..cd7b6b2 100644
+--- a/Include/Python.h
++++ b/Include/Python.h
+@@ -28,6 +28,32 @@
+ #ifndef MS_WINDOWS
+ #  include <unistd.h>
+ #endif
++#ifdef __vita__
++/* arm-vita-eabi is ILP32.  Fallbacks only: configure's AC_CHECK_SIZEOF
++   values (which work when cross-compiling) take precedence.  time_t is
++   deliberately not listed: newlib's time_t is 64-bit. */
++#  ifndef HAVE_PTHREAD_H
++#    define HAVE_PTHREAD_H 1
++#  endif
++#  ifndef SIZEOF_LONG
++#    define SIZEOF_LONG 4
++#  endif
++#  ifndef SIZEOF_PTHREAD_T
++#    define SIZEOF_PTHREAD_T 4
++#  endif
++#  ifndef SIZEOF_SIZE_T
++#    define SIZEOF_SIZE_T 4
++#  endif
++#  ifndef SIZEOF_VOID_P
++#    define SIZEOF_VOID_P 4
++#  endif
++#  ifndef SIZEOF_UINTPTR_T
++#    define SIZEOF_UINTPTR_T 4
++#  endif
++#  ifndef ALIGNOF_SIZE_T
++#    define ALIGNOF_SIZE_T 4
++#  endif
++#endif
+ #ifdef HAVE_STDDEF_H
+ #  include <stddef.h>             // size_t
+ #endif
+diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
+index 95fad89..7af16db 100644
+--- a/Include/cpython/pystate.h
++++ b/Include/cpython/pystate.h
+@@ -260,6 +260,10 @@ struct _ts {
+ #else
+ #  if defined(__wasi__)
+ #    define C_RECURSION_LIMIT 500
++#  elif defined(__vita__)
++     // PS Vita threads have small fixed stacks (see thread_pthread.h).
++     // 1000 matches the effective 3.11 limit the Vita port was tested with.
++#    define C_RECURSION_LIMIT 1000
+ #  elif defined(__s390x__)
+ #    define C_RECURSION_LIMIT 800
+ #  elif defined(_WIN32)
+diff --git a/Include/osdefs.h b/Include/osdefs.h
+index 3243944..c9d47b1 100644
+--- a/Include/osdefs.h
++++ b/Include/osdefs.h
+@@ -14,6 +14,13 @@ extern "C" {
+ #define DELIM L';'
+ #endif
+ 
++#ifdef __vita__
++#include <psp2/io/fcntl.h>
++#define SEP L'/'
++#define MAXPATHLEN 512
++#define DELIM L';'
++#endif
++
+ #ifdef __VXWORKS__
+ #define DELIM L';'
+ #endif
+diff --git a/Include/pyport.h b/Include/pyport.h
+index e2bac3b..e2a15b6 100644
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -129,6 +129,9 @@ typedef intptr_t        Py_intptr_t;
+ 
+ #elif HAVE_SSIZE_T
+ typedef ssize_t         Py_ssize_t;
++#  if defined(__vita__) && !defined(SSIZE_MAX)
++#    define SSIZE_MAX 2147483647
++#  endif
+ #   define PY_SSIZE_T_MAX SSIZE_MAX
+ #elif SIZEOF_VOID_P == SIZEOF_SIZE_T
+ typedef Py_intptr_t     Py_ssize_t;
+@@ -684,7 +687,7 @@ extern char * _getpty(int *, int, mode_t, int);
+ #  error "Py_TRACE_REFS ABI is not compatible with release and debug ABI"
+ #endif
+ 
+-#if defined(__ANDROID__) || defined(__VXWORKS__)
++#if defined(__ANDROID__) || defined(__VXWORKS__) || defined(__vita__)
+    // Use UTF-8 as the locale encoding, ignore the LC_CTYPE locale.
+    // See _Py_GetLocaleEncoding(), PyUnicode_DecodeLocale()
+    // and PyUnicode_EncodeLocale().
+diff --git a/Lib/importlib/_bootstrap_external.py b/Lib/importlib/_bootstrap_external.py
+index 6e4a087..c1a3df2 100644
+--- a/Lib/importlib/_bootstrap_external.py
++++ b/Lib/importlib/_bootstrap_external.py
+@@ -31,6 +31,7 @@
+ 
+ 
+ _MS_WINDOWS = (sys.platform == 'win32')
++_VITA = (sys.platform == 'vita')
+ if _MS_WINDOWS:
+     import nt as _os
+     import winreg
+@@ -176,6 +177,16 @@ def _path_isabs(path):
+         root = _os._path_splitroot(path)[0].replace('/', '\\')
+         return len(root) > 1 and (root.startswith('\\\\') or root.endswith('\\'))
+ 
++elif _VITA:
++    def _path_isabs(path):
++        """Replacement for os.path.isabs: Vita paths are absolute when
++        they start with a device prefix such as 'ux0:' or 'app0:'."""
++        colon = path.find(':')
++        if colon <= 0:
++            return False
++        slash = path.find('/')
++        return slash == -1 or colon < slash
++
+ else:
+     def _path_isabs(path):
+         """Replacement for os.path.isabs."""
+diff --git a/Lib/os.py b/Lib/os.py
+index a01eed5..6fcfce2 100644
+--- a/Lib/os.py
++++ b/Lib/os.py
+@@ -58,7 +58,12 @@ def _get_exports_list(module):
+         __all__.append('_exit')
+     except ImportError:
+         pass
+-    import posixpath as path
++    if sys.platform == 'vita':
++        # The Vita keeps the posix module but uses device-prefixed paths
++        # ("ux0:/data"), which need their own os.path implementation.
++        import vitapath as path
++    else:
++        import posixpath as path
+ 
+     try:
+         from posix import _have_functions
+diff --git a/Lib/site.py b/Lib/site.py
+index aed254a..ddf1efd 100644
+--- a/Lib/site.py
++++ b/Lib/site.py
+@@ -80,7 +80,7 @@
+ PREFIXES = [sys.prefix, sys.exec_prefix]
+ # Enable per user site-packages directory
+ # set it to False to disable the feature or True to force the feature
+-ENABLE_USER_SITE = None
++ENABLE_USER_SITE = False
+ 
+ # for distutils.commands.install
+ # These values are initialized by the getuserbase() and getusersitepackages()
+diff --git a/Lib/subprocess.py b/Lib/subprocess.py
+index 881a9ce..be1bc2f 100644
+--- a/Lib/subprocess.py
++++ b/Lib/subprocess.py
+@@ -75,7 +75,7 @@
+     _mswindows = True
+ 
+ # wasm32-emscripten and wasm32-wasi do not support processes
+-_can_fork_exec = sys.platform not in {"emscripten", "wasi"}
++_can_fork_exec = sys.platform not in {"emscripten", "wasi","vita"}
+ 
+ if _mswindows:
+     import _winapi
+diff --git a/Makefile.pre.in b/Makefile.pre.in
+index 3e9b5cb..4509425 100644
+--- a/Makefile.pre.in
++++ b/Makefile.pre.in
+@@ -1126,6 +1126,7 @@ FROZEN_FILES_IN = \
+ 		Lib/genericpath.py \
+ 		Lib/ntpath.py \
+ 		Lib/posixpath.py \
++		Lib/vitapath.py \
+ 		Lib/os.py \
+ 		Lib/site.py \
+ 		Lib/stat.py \
+@@ -1151,6 +1152,7 @@ FROZEN_FILES_OUT = \
+ 		Python/frozen_modules/genericpath.h \
+ 		Python/frozen_modules/ntpath.h \
+ 		Python/frozen_modules/posixpath.h \
++		Python/frozen_modules/vitapath.h \
+ 		Python/frozen_modules/os.h \
+ 		Python/frozen_modules/site.h \
+ 		Python/frozen_modules/stat.h \
+@@ -1211,6 +1213,9 @@ Python/frozen_modules/ntpath.h: Lib/ntpath.py $(FREEZE_MODULE_DEPS)
+ Python/frozen_modules/posixpath.h: Lib/posixpath.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) posixpath $(srcdir)/Lib/posixpath.py Python/frozen_modules/posixpath.h
+ 
++Python/frozen_modules/vitapath.h: Lib/vitapath.py $(FREEZE_MODULE_DEPS)
++	$(FREEZE_MODULE) vitapath $(srcdir)/Lib/vitapath.py Python/frozen_modules/vitapath.h
++
+ Python/frozen_modules/os.h: Lib/os.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) os $(srcdir)/Lib/os.py Python/frozen_modules/os.h
+ 
+@@ -1278,6 +1283,7 @@ $(DEEPFREEZE_C): $(DEEPFREEZE_DEPS)
+ 	Python/frozen_modules/genericpath.h:genericpath \
+ 	Python/frozen_modules/ntpath.h:ntpath \
+ 	Python/frozen_modules/posixpath.h:posixpath \
++	Python/frozen_modules/vitapath.h:vitapath \
+ 	Python/frozen_modules/os.h:os \
+ 	Python/frozen_modules/site.h:site \
+ 	Python/frozen_modules/stat.h:stat \
+diff --git a/Modules/_io/fileio.c b/Modules/_io/fileio.c
+index bab6807..d564d7b 100644
+--- a/Modules/_io/fileio.c
++++ b/Modules/_io/fileio.c
+@@ -264,7 +264,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
+         else
+             self->fd = -1;
+     }
+-
++    
+     fd = _PyLong_AsInt(nameobj);
+     if (fd < 0) {
+         if (!PyErr_Occurred()) {
+@@ -432,7 +432,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
+         }
+         fd_is_own = 1;
+ 
+-#ifndef MS_WINDOWS
++#if !defined(MS_WINDOWS) && !defined(__vita__)
+         if (_Py_set_inheritable(self->fd, 0, atomic_flag_works) < 0)
+             goto error;
+ #endif
+diff --git a/Modules/_multiprocessing/semaphore.c b/Modules/_multiprocessing/semaphore.c
+index bc718e2..3079518 100644
+--- a/Modules/_multiprocessing/semaphore.c
++++ b/Modules/_multiprocessing/semaphore.c
+@@ -227,6 +227,10 @@ _multiprocessing_SemLock_release_impl(SemLockObject *self)
+ #  define SEM_FAILED ((sem_t *)-1)
+ #endif
+ 
++#ifdef __vita__
++#define SEM_FAILED      ((sem_t *) 0)
++#endif
++
+ #ifndef HAVE_SEM_UNLINK
+ #  define sem_unlink(name) 0
+ #endif
+@@ -556,7 +560,11 @@ _multiprocessing_SemLock__rebuild_impl(PyTypeObject *type, SEM_HANDLE handle,
+ 
+ #ifndef MS_WINDOWS
+     if (name != NULL) {
++#ifdef __vita__
++        handle = sem_open(name, 0, 0, 0);
++#else
+         handle = sem_open(name, 0);
++#endif
+         if (handle == SEM_FAILED) {
+             PyErr_SetFromErrno(PyExc_OSError);
+             PyMem_Free(name_copy);
+diff --git a/Modules/getnameinfo.c b/Modules/getnameinfo.c
+index 335021f..773347d 100644
+--- a/Modules/getnameinfo.c
++++ b/Modules/getnameinfo.c
+@@ -144,7 +144,11 @@ getnameinfo(sa, salen, host, hostlen, serv, servlen, flags)
+             return ENI_MEMORY;
+         strcpy(serv, numserv);
+     } else {
++#ifdef __vita__
++        sp = NULL;
++#else
+         sp = getservbyport(port, (flags & NI_DGRAM) ? "udp" : "tcp");
++#endif
+         if (sp) {
+             if (strlen(sp->s_name) > servlen)
+                 return ENI_MEMORY;
+diff --git a/Modules/getpath.c b/Modules/getpath.c
+index 0a31000..012de44 100644
+--- a/Modules/getpath.c
++++ b/Modules/getpath.c
+@@ -878,6 +878,8 @@ _PyConfig_InitPathConfig(PyConfig *config, int compute_path_config)
+         !decode_to_dict(dict, "os_name", "nt") ||
+ #elif defined(__APPLE__)
+         !decode_to_dict(dict, "os_name", "darwin") ||
++#elif defined(__vita__)
++        !decode_to_dict(dict, "os_name", "vita") ||
+ #else
+         !decode_to_dict(dict, "os_name", "posix") ||
+ #endif
+diff --git a/Modules/getpath.py b/Modules/getpath.py
+index 29a6b30..299070c 100644
+--- a/Modules/getpath.py
++++ b/Modules/getpath.py
+@@ -197,6 +197,19 @@
+     DELIM = ';'
+     SEP = '\\'
+ 
++elif os_name == 'vita':
++    BUILDDIR_TXT = 'pybuilddir.txt'
++    BUILD_LANDMARK = 'Modules/Setup.local'
++    DEFAULT_PROGRAM_NAME = f'python{VERSION_MAJOR}'
++    STDLIB_SUBDIR = f'{platlibdir}/python{VERSION_MAJOR}.{VERSION_MINOR}'
++    STDLIB_LANDMARKS = [f'{STDLIB_SUBDIR}/os.py', f'{STDLIB_SUBDIR}/os.pyc']
++    PLATSTDLIB_LANDMARK = f'{platlibdir}/python{VERSION_MAJOR}.{VERSION_MINOR}/lib-dynload'
++    BUILDSTDLIB_LANDMARKS = ['Lib/os.py']
++    VENV_LANDMARK = 'pyvenv.cfg'
++    ZIP_LANDMARK = f'{platlibdir}/python{VERSION_MAJOR}{VERSION_MINOR}.zip'
++    DELIM = ';'
++    SEP = '/'
++
+ 
+ # ******************************************************************************
+ # HELPER FUNCTIONS (note that we prefer C functions for performance)
+diff --git a/Modules/posixmodule.c b/Modules/posixmodule.c
+index c21c6f0..1dc88f6 100644
+--- a/Modules/posixmodule.c
++++ b/Modules/posixmodule.c
+@@ -369,6 +369,14 @@ corresponding Unix manual entries for more information on calls.");
+ #  define HAVE_PIPE       1
+ #  define HAVE_FSYNC      1
+ #  define fsync _commit
++#elif defined(__vita__)
++   /* PlayStation Vita (VitaSDK newlib): configure detects some functions
++      that only exist as stubs. */
++#  define HAVE_OPENDIR    1
++#  undef HAVE_FSYNC
++#  undef HAVE_FDATASYNC
++#  undef HAVE_FCHDIR
++#  undef HAVE_SYMLINK
+ #endif  /* ! __WATCOMC__ || __QNX__ */
+ 
+ /*[clinic input]
+@@ -10302,7 +10310,7 @@ os_open_impl(PyObject *module, path_t *path, int flags, int mode, int dir_fd)
+         return -1;
+     }
+ 
+-#ifndef MS_WINDOWS
++#if !defined(MS_WINDOWS) && !defined(__vita__)
+     if (_Py_set_inheritable(fd, 0, atomic_flag_works) < 0) {
+         close(fd);
+         return -1;
+@@ -15162,7 +15170,10 @@ join_path_filename(const char *path_narrow, const char* filename, Py_ssize_t fil
+ 
+ static PyObject *
+ DirEntry_from_posix_info(PyObject *module, path_t *path, const char *name,
+-                         Py_ssize_t name_len, ino_t d_ino
++                         Py_ssize_t name_len
++#ifndef __vita__
++                        , ino_t d_ino
++#endif
+ #ifdef HAVE_DIRENT_D_TYPE
+                          , unsigned char d_type
+ #endif
+@@ -15214,7 +15225,11 @@ DirEntry_from_posix_info(PyObject *module, path_t *path, const char *name,
+ #ifdef HAVE_DIRENT_D_TYPE
+     entry->d_type = d_type;
+ #endif
++#ifndef __vita__
+     entry->d_ino = d_ino;
++#else
++    entry->d_ino = 0;  /* newlib's struct dirent has no d_ino on the Vita */
++#endif
+ 
+     return (PyObject *)entry;
+ 
+@@ -15367,7 +15382,10 @@ ScandirIterator_iternext(ScandirIterator *iterator)
+             PyObject *module = PyType_GetModule(Py_TYPE(iterator));
+             entry = DirEntry_from_posix_info(module,
+                                              &iterator->path, direntp->d_name,
+-                                             name_len, direntp->d_ino
++                                             name_len
++#ifndef __vita__
++                                            , direntp->d_ino
++#endif
+ #ifdef HAVE_DIRENT_D_TYPE
+                                              , direntp->d_type
+ #endif
+@@ -15939,7 +15957,9 @@ static PyMethodDef posix_methods[] = {
+     OS_RMDIR_METHODDEF
+     OS_SYMLINK_METHODDEF
+     OS_SYSTEM_METHODDEF
++#ifdef HAVE_UMASK
+     OS_UMASK_METHODDEF
++#endif
+     OS_UNAME_METHODDEF
+     OS_UNLINK_METHODDEF
+     OS_REMOVE_METHODDEF
+diff --git a/Modules/socketmodule.c b/Modules/socketmodule.c
+index 27afd73..5eb848e 100644
+--- a/Modules/socketmodule.c
++++ b/Modules/socketmodule.c
+@@ -206,6 +206,10 @@ shutdown(how) -- shut down traffic in one or both directions\n\
+ #  include <sys/ioctl.h>
+ #endif
+ 
++#ifdef __vita__
++#  define SOMAXCONN 5
++#endif
++
+ 
+ #if defined(__sgi) && _COMPILER_VERSION>700 && !_SGIAPI
+ /* make sure that the reentrant (gethostbyaddr_r etc)
+@@ -744,6 +748,10 @@ internal_setblocking(PySocketSockObject *s, int block)
+     block = !block;
+     if (ioctl(s->sock_fd, FIONBIO, (unsigned int *)&block) == -1)
+         goto done;
++#elif defined(__vita__)
++	block = !block;
++	if (setsockopt(s->sock_fd, SOL_SOCKET, SO_NONBLOCK, &block, sizeof(int)) == -1)
++        goto done;
+ #else
+     delay_flag = fcntl(s->sock_fd, F_GETFL, 0);
+     if (delay_flag == -1)
+@@ -5589,10 +5597,12 @@ sock_initobj_impl(PySocketSockObject *self, int family, int type, int proto,
+             return -1;
+         }
+ 
++#ifndef __vita__
+         if (_Py_set_inheritable(fd, 0, atomic_flag_works) < 0) {
+             SOCKETCLOSE(fd);
+             return -1;
+         }
++#endif
+ #endif
+     }
+     if (init_sockobject(state, self, fd, family, type, proto) == -1) {
+@@ -5804,7 +5814,9 @@ gethost_common(socket_state *state, struct hostent *h, struct sockaddr *addr,
+ 
+     if (h == NULL) {
+         /* Let's get real error message to return */
++#ifndef __vita__
+         set_herror(state, h_errno);
++#endif
+         return NULL;
+     }
+ 
+diff --git a/Modules/timemodule.c b/Modules/timemodule.c
+index 5907826..94c36a9 100644
+--- a/Modules/timemodule.c
++++ b/Modules/timemodule.c
+@@ -45,6 +45,10 @@
+ #  define _Py_timezone _timezone
+ #  define _Py_daylight _daylight
+ #  define _Py_tzname _tzname
++#elif defined(__vita__)
++#define _Py_timezone 0
++#define _Py_daylight 0
++#define _Py_tzname 
+ #else
+ #  define _Py_timezone timezone
+ #  define _Py_daylight daylight
+@@ -1843,6 +1847,7 @@ init_timezone(PyObject *m)
+         return -1;
+     }
+ #else
++#ifndef __vita__
+     otz0 = PyUnicode_DecodeLocale(_Py_tzname[0], "surrogateescape");
+     if (otz0 == NULL) {
+         return -1;
+@@ -1852,6 +1857,19 @@ init_timezone(PyObject *m)
+         Py_DECREF(otz0);
+         return -1;
+     }
++#else
++    /* newlib on the Vita has no tzname; the console clock is local time,
++       so report it as a zero-offset zone. */
++    otz0 = PyUnicode_FromString("UTC");
++    if (otz0 == NULL) {
++        return -1;
++    }
++    otz1 = PyUnicode_FromString("UTC");
++    if (otz1 == NULL) {
++        Py_DECREF(otz0);
++        return -1;
++    }
++#endif // __vita__
+ #endif // MS_WINDOWS
+     if (_PyModule_Add(m, "tzname", Py_BuildValue("(NN)", otz0, otz1)) < 0) {
+         return -1;
+diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
+index 3df0a07..f221e8a 100644
+--- a/PCbuild/_freeze_module.vcxproj
++++ b/PCbuild/_freeze_module.vcxproj
+@@ -301,6 +301,11 @@
+       <IntFile>$(IntDir)posixpath.g.h</IntFile>
+       <OutFile>$(PySourcePath)Python\frozen_modules\posixpath.h</OutFile>
+     </None>
++    <None Include="..\Lib\vitapath.py">
++      <ModName>vitapath</ModName>
++      <IntFile>$(IntDir)vitapath.g.h</IntFile>
++      <OutFile>$(PySourcePath)Python\frozen_modules\vitapath.h</OutFile>
++    </None>
+     <None Include="..\Lib\os.py">
+       <ModName>os</ModName>
+       <IntFile>$(IntDir)os.g.h</IntFile>
+@@ -415,6 +420,7 @@
+ 		 "$(PySourcePath)Python\frozen_modules\genericpath.h:genericpath" ^
+ 		 "$(PySourcePath)Python\frozen_modules\ntpath.h:ntpath" ^
+ 		 "$(PySourcePath)Python\frozen_modules\posixpath.h:posixpath" ^
++		 "$(PySourcePath)Python\frozen_modules\vitapath.h:vitapath" ^
+ 		 "$(PySourcePath)Python\frozen_modules\os.h:os" ^
+ 		 "$(PySourcePath)Python\frozen_modules\site.h:site" ^
+ 		 "$(PySourcePath)Python\frozen_modules\stat.h:stat" ^
+diff --git a/PCbuild/_freeze_module.vcxproj.filters b/PCbuild/_freeze_module.vcxproj.filters
+index d98a4c5..5f76883 100644
+--- a/PCbuild/_freeze_module.vcxproj.filters
++++ b/PCbuild/_freeze_module.vcxproj.filters
+@@ -462,6 +462,9 @@
+     <None Include="..\Lib\posixpath.py">
+       <Filter>Python Files</Filter>
+     </None>
++    <None Include="..\Lib\vitapath.py">
++      <Filter>Python Files</Filter>
++    </None>
+     <None Include="..\Lib\os.py">
+       <Filter>Python Files</Filter>
+     </None>
+diff --git a/Python/fileutils.c b/Python/fileutils.c
+index c752175..f0d251e 100644
+--- a/Python/fileutils.c
++++ b/Python/fileutils.c
+@@ -1662,7 +1662,7 @@ _Py_open_impl(const char *pathname, int flags, int gil_held)
+             return -1;
+     }
+ 
+-#ifndef MS_WINDOWS
++#if !defined(MS_WINDOWS) && !defined(__vita__)
+     if (set_inheritable(fd, 0, gil_held, atomic_flag_works) < 0) {
+         close(fd);
+         return -1;
+@@ -1829,11 +1829,12 @@ _Py_fopen_obj(PyObject *path, const char *mode)
+         PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, path);
+         return NULL;
+     }
+-
++#ifndef __vita__
+     if (set_inheritable(fileno(f), 0, 1, NULL) < 0) {
+         fclose(f);
+         return NULL;
+     }
++#endif
+     return f;
+ }
+ 
+diff --git a/Python/frozen.c b/Python/frozen.c
+index f8e0b8b..fbb4f9d 100644
+--- a/Python/frozen.c
++++ b/Python/frozen.c
+@@ -52,6 +52,7 @@
+ #include "frozen_modules/genericpath.h"
+ #include "frozen_modules/ntpath.h"
+ #include "frozen_modules/posixpath.h"
++#include "frozen_modules/vitapath.h"
+ #include "frozen_modules/os.h"
+ #include "frozen_modules/site.h"
+ #include "frozen_modules/stat.h"
+@@ -80,6 +81,7 @@ extern PyObject *_Py_get__sitebuiltins_toplevel(void);
+ extern PyObject *_Py_get_genericpath_toplevel(void);
+ extern PyObject *_Py_get_ntpath_toplevel(void);
+ extern PyObject *_Py_get_posixpath_toplevel(void);
++extern PyObject *_Py_get_vitapath_toplevel(void);
+ extern PyObject *_Py_get_os_toplevel(void);
+ extern PyObject *_Py_get_site_toplevel(void);
+ extern PyObject *_Py_get_stat_toplevel(void);
+@@ -112,6 +114,7 @@ static const struct _frozen stdlib_modules[] = {
+     {"genericpath", _Py_M__genericpath, (int)sizeof(_Py_M__genericpath), false, GET_CODE(genericpath)},
+     {"ntpath", _Py_M__ntpath, (int)sizeof(_Py_M__ntpath), false, GET_CODE(ntpath)},
+     {"posixpath", _Py_M__posixpath, (int)sizeof(_Py_M__posixpath), false, GET_CODE(posixpath)},
++    {"vitapath", _Py_M__vitapath, (int)sizeof(_Py_M__vitapath), false, GET_CODE(vitapath)},
+     {"os.path", _Py_M__posixpath, (int)sizeof(_Py_M__posixpath), false, GET_CODE(posixpath)},
+     {"os", _Py_M__os, (int)sizeof(_Py_M__os), false, GET_CODE(os)},
+     {"site", _Py_M__site, (int)sizeof(_Py_M__site), false, GET_CODE(site)},
+diff --git a/Python/pylifecycle.c b/Python/pylifecycle.c
+index f5bea14..db9f85a 100644
+--- a/Python/pylifecycle.c
++++ b/Python/pylifecycle.c
+@@ -2351,7 +2351,7 @@ is_valid_fd(int fd)
+         defined(__APPLE__) || \
+         defined(__wasm__))
+     return fcntl(fd, F_GETFD) >= 0;
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__vita__)
+     int fd2 = dup(fd);
+     if (fd2 >= 0) {
+         close(fd2);
+diff --git a/Python/stdlib_module_names.h b/Python/stdlib_module_names.h
+index 1b1a1bd..0288e9b 100644
+--- a/Python/stdlib_module_names.h
++++ b/Python/stdlib_module_names.h
+@@ -288,6 +288,7 @@ static const char* _Py_stdlib_module_names[] = {
+ "uu",
+ "uuid",
+ "venv",
++"vitapath",
+ "warnings",
+ "wave",
+ "weakref",
+diff --git a/Python/thread_pthread.h b/Python/thread_pthread.h
+index 896230d..c6e3d31 100644
+--- a/Python/thread_pthread.h
++++ b/Python/thread_pthread.h
+@@ -15,6 +15,11 @@
+ #endif
+ #include <signal.h>
+ 
++#ifdef __vita__
++#include <psp2/kernel/cpu.h>
++#include <psp2/kernel/threadmgr.h>
++#endif
++
+ #if defined(__linux__)
+ #   include <sys/syscall.h>     /* syscall(SYS_gettid) */
+ #elif defined(__FreeBSD__)
+@@ -69,6 +74,12 @@
+ #undef  THREAD_STACK_SIZE
+ #define THREAD_STACK_SIZE       0x100000
+ #endif
++#if defined(__vita__) && defined(THREAD_STACK_SIZE) && THREAD_STACK_SIZE == 0
++/* 1 MiB: enough for C_RECURSION_LIMIT (1000) levels of pickling or repr in
++   Ren'Py's autosave/preload threads.  Ren'Py starts only a handful of threads. */
++#undef  THREAD_STACK_SIZE
++#define THREAD_STACK_SIZE       0x100000
++#endif
+ /* for safety, ensure a viable minimum stacksize */
+ #define THREAD_STACK_MIN        0x8000  /* 32 KiB */
+ #else  /* !_POSIX_THREAD_ATTR_STACKSIZE */
+@@ -128,7 +139,11 @@
+ static void
+ init_condattr(void)
+ {
+-#ifdef CONDATTR_MONOTONIC
++#if defined(CONDATTR_MONOTONIC) && !defined(__vita__)
++    /* Not on the Vita: its pthread_condattr_setclock() accepts
++       CLOCK_MONOTONIC, but pthread_cond_timedwait() still measures the
++       deadline against CLOCK_REALTIME, so every timed wait (the GIL hand-off,
++       Lock.acquire(timeout), Condition.wait(timeout)) would return at once. */
+ # define ca _PyRuntime.threads._condattr_monotonic.val
+     // XXX We need to check the return code?
+     pthread_condattr_init(&ca);
+@@ -234,6 +249,15 @@ pythread_wrapper(void *arg)
+     void *func_arg = callback->arg;
+     PyMem_RawFree(arg);
+ 
++#ifdef __vita__
++    /* Keep Python's own threads (image preloading, audio upkeep, autosave)
++       off core 0, which the launcher gives the main thread. Work they do
++       without the GIL, like decoding images, then really runs alongside the
++       game instead of waiting for it to idle. */
++    sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(),
++        SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2);
++#endif
++
+     func(func_arg);
+     return NULL;
+ }
+diff --git a/Tools/build/freeze_modules.py b/Tools/build/freeze_modules.py
+index 5e3bd1f..f6ac690 100644
+--- a/Tools/build/freeze_modules.py
++++ b/Tools/build/freeze_modules.py
+@@ -64,6 +64,9 @@
+         'genericpath',
+         'ntpath',
+         'posixpath',
++        # Path module for the PlayStation Vita (selected by os.py when
++        # sys.platform == 'vita').  Frozen so os can import it at startup.
++        'vitapath',
+         # We must explicitly mark os.path as a frozen module
+         # even though it will never be imported.
+         f'{OS_PATH} : os.path',
+diff --git a/configure b/configure
+index 20a5890..015bee4 100755
+--- a/configure
++++ b/configure
+@@ -4274,6 +4274,9 @@ then
+ 	*-*-cygwin*)
+ 		ac_sys_system=Cygwin
+ 		;;
++  arm-vita-eabi)
++		ac_sys_system=Vita
++		;;
+ 	*-*-vxworks*)
+ 	    ac_sys_system=VxWorks
+ 	    ;;
+@@ -4342,6 +4345,9 @@ if test "$cross_compiling" = yes; then
+ 	*-*-vxworks*)
+ 		_host_cpu=$host_cpu
+ 		;;
++  arm-vita-eabi)
++		_host_cpu=arm
++		;;
+ 	wasm32-*-* | wasm64-*-*)
+ 		_host_cpu=$host_cpu
+ 		;;
+diff --git a/configure.ac b/configure.ac
+index 4cbd0ae..59f97b2 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -550,6 +550,9 @@ then
+ 	*-*-cygwin*)
+ 		ac_sys_system=Cygwin
+ 		;;
++  arm-vita-eabi)
++		ac_sys_system=Vita
++		;;
+ 	*-*-vxworks*)
+ 	    ac_sys_system=VxWorks
+ 	    ;;
+@@ -616,6 +619,9 @@ if test "$cross_compiling" = yes; then
+ 	*-*-vxworks*)
+ 		_host_cpu=$host_cpu
+ 		;;
++  arm-vita-eabi)
++		_host_cpu=arm
++		;;
+ 	wasm32-*-* | wasm64-*-*)
+ 		_host_cpu=$host_cpu
+ 		;;
+diff --git a/Lib/vitapath.py b/Lib/vitapath.py
+new file mode 100644
+index 0000000..5fc3ee6
+--- /dev/null
++++ b/Lib/vitapath.py
+@@ -0,0 +1,506 @@
++"""Common operations on PlayStation Vita pathnames.
++
++Instead of importing this module directly, import os and refer to
++this module as os.path.  On the Vita (sys.platform == 'vita') os.py
++selects this module instead of posixpath.
++
++Vita paths look like "ux0:/data/foo" or "app0:foo": a device prefix
++ending in ':' (the "drive"), an optional '/' root, then '/'-separated
++components.  A path is absolute when it has a drive.  The filesystem is
++case-insensitive and has no symbolic links.
++
++Derived from Lib/posixpath.py (CPython 3.12) and Grimiku's 3.11 vitapath.
++"""
++
++# Strings representing various path-related bits and pieces.
++# These are primarily for export; internally, they are hardcoded.
++# Should be set before imports for resolving cyclic dependency.
++curdir = '.'
++pardir = '..'
++extsep = '.'
++sep = '/'
++pathsep = ';'
++defpath = 'app0:;ux0:'
++altsep = None
++devnull = None  # no null device on the Vita
++
++import os
++import sys
++import stat
++import genericpath
++from genericpath import *
++
++__all__ = ["normcase","isabs","join","splitdrive","splitroot","split","splitext",
++           "basename","dirname","commonprefix","getsize","getmtime",
++           "getatime","getctime","islink","exists","lexists","isdir","isfile",
++           "ismount", "expanduser","expandvars","normpath","abspath",
++           "samefile","sameopenfile","samestat",
++           "curdir","pardir","sep","pathsep","defpath","altsep","extsep",
++           "devnull","realpath","supports_unicode_filenames","relpath",
++           "commonpath", "isjunction", "ALLOW_MISSING"]
++
++
++def _get_sep(path):
++    if isinstance(path, bytes):
++        return b'/'
++    else:
++        return '/'
++
++# Normalize the case of a pathname.  Trivial in Posix, string.lower on Mac.
++# On MS-DOS this may also turn slashes into backslashes; however, other
++# normalizations (such as optimizing '../' away) are not allowed
++# (another function should be defined to do that).
++
++def _splitdrive(p):
++    """Return (drive, rest) where drive is 'dev:' if p starts with a device
++    prefix (a ':' appearing before any '/'), else empty."""
++    if isinstance(p, bytes):
++        colon, sep = b':', b'/'
++    else:
++        colon, sep = ':', '/'
++    i = p.find(colon)
++    if i > 0:
++        j = p.find(sep)
++        if j == -1 or i < j:
++            return p[:i+1], p[i+1:]
++    return p[:0], p
++
++
++def normcase(s):
++    """Normalize case of pathname.  The Vita filesystem is case-insensitive."""
++    return os.fspath(s).lower()
++
++
++# Return whether a path is absolute.
++# Trivial in Posix, harder on the Mac or MS-DOS.
++
++def isabs(s):
++    """Test whether a path is absolute"""
++    s = os.fspath(s)
++    return bool(_splitdrive(s)[0])
++
++
++# Join pathnames.
++# Ignore the previous parts if a part is absolute.
++# Insert a '/' unless the first part is empty or already ends in '/'.
++
++def join(a, *p):
++    """Join two or more pathname components, inserting '/' as needed.
++    If any component is an absolute path, all previous path components
++    will be discarded.  An empty last part will result in a path that
++    ends with a separator."""
++    a = os.fspath(a)
++    sep = _get_sep(a)
++    try:
++        if not p:
++            a[:0] + sep  #23780: Ensure compatible data type even if p is null.
++        result_drive, result_path = _splitdrive(a)
++        for b in map(os.fspath, p):
++            p_drive, p_path = _splitdrive(b)
++            if p_drive:
++                # Second path is absolute: it replaces everything.
++                result_drive, result_path = p_drive, p_path
++                continue
++            if p_path.startswith(sep):
++                # Rooted path: keep the drive, replace the path.
++                result_path = p_path
++                continue
++            if result_path and not result_path.endswith(sep):
++                result_path = result_path + sep
++            result_path = result_path + p_path
++    except (TypeError, AttributeError, BytesWarning):
++        genericpath._check_arg_types('join', a, *p)
++        raise
++    return result_drive + result_path
++
++
++# Split a path in head (everything up to the last '/') and tail (the
++# rest).  If the path ends in '/', tail will be empty.  If there is no
++# '/' in the path, head  will be empty.
++# Trailing '/'es are stripped from head unless it is the root.
++
++def split(p):
++    """Split a pathname.  Returns tuple "(head, tail)" where "tail" is
++    everything after the final slash.  Either part may be empty."""
++    p = os.fspath(p)
++    sep = _get_sep(p)
++    d, p = _splitdrive(p)
++    i = p.rfind(sep) + 1
++    head, tail = p[:i], p[i:]
++    if head and head != sep*len(head):
++        head = head.rstrip(sep)
++    return d + head, tail
++
++
++# Split a path in root and extension.
++# The extension is everything starting at the last dot in the last
++# pathname component; the root is everything before that.
++# It is always true that root + ext == p.
++
++def splitext(p):
++    p = os.fspath(p)
++    if isinstance(p, bytes):
++        sep = b'/'
++        extsep = b'.'
++    else:
++        sep = '/'
++        extsep = '.'
++    return genericpath._splitext(p, sep, None, extsep)
++splitext.__doc__ = genericpath._splitext.__doc__
++
++# Split a pathname into a drive specification and the rest of the
++# path.  Useful on DOS/Windows/NT; on Unix, the drive is always empty.
++
++def splitdrive(p):
++    """Split a pathname into drive and path, e.g.
++    splitdrive('ux0:/data') == ('ux0:', '/data')."""
++    return _splitdrive(os.fspath(p))
++
++
++def splitroot(p):
++    """Split a pathname into drive, root and tail. For example:
++
++        splitroot('ux0:/data/x') == ('ux0:', '/', 'data/x')
++        splitroot('app0:x')      == ('app0:', '', 'x')
++        splitroot('/data/x')     == ('', '/', 'data/x')
++        splitroot('data/x')      == ('', '', 'data/x')
++    """
++    p = os.fspath(p)
++    sep = _get_sep(p)
++    drive, rest = _splitdrive(p)
++    if rest[:1] == sep:
++        return drive, rest[:1], rest[1:]
++    return drive, rest[:0], rest
++
++
++# Return the tail (basename) part of a path, same as split(path)[1].
++
++def basename(p):
++    """Returns the final component of a pathname"""
++    return split(p)[1]
++
++
++# Return the head (dirname) part of a path, same as split(path)[0].
++
++def dirname(p):
++    """Returns the directory component of a pathname"""
++    return split(p)[0]
++
++
++# Is a path a junction?
++
++def isjunction(path):
++    """Test whether a path is a junction
++    Junctions are not a part of posix semantics"""
++    os.fspath(path)
++    return False
++
++
++# Being true for dangling symbolic links is also useful.
++
++def lexists(path):
++    """Test whether a path exists.  Returns True for broken symbolic links"""
++    try:
++        os.lstat(path)
++    except (OSError, ValueError):
++        return False
++    return True
++
++
++# Is a path a mount point?  On the Vita the mount points are exactly the
++# device roots ("ux0:", "ux0:/", "app0:" ...).
++
++def ismount(path):
++    """Test whether a path is a mount point (a device root)"""
++    path = os.fspath(path)
++    sep = _get_sep(path)
++    drive, root, tail = splitroot(path)
++    return bool(drive) and not tail.strip(sep) and lexists(path)
++
++
++# Expand paths beginning with '~' or '~user'.
++# '~' means $HOME; '~user' means that user's home directory.
++# If the path doesn't begin with '~', or if the user or $HOME is unknown,
++# the path is returned unchanged (leaving error reporting to whatever
++# function is called with the expanded path as argument).
++# See also module 'glob' for expansion of *, ? and [...] in pathnames.
++# (A function should also be defined to do full *sh-style environment
++# variable expansion.)
++
++def expanduser(path):
++    """Expand ~ and ~user constructions.  If user or $HOME is unknown,
++    do nothing."""
++    path = os.fspath(path)
++    if isinstance(path, bytes):
++        tilde = b'~'
++    else:
++        tilde = '~'
++    if not path.startswith(tilde):
++        return path
++    sep = _get_sep(path)
++    i = path.find(sep, 1)
++    if i < 0:
++        i = len(path)
++    if i == 1:
++        if 'HOME' not in os.environ:
++            try:
++                import pwd
++            except ImportError:
++                # pwd module unavailable, return path unchanged
++                return path
++            try:
++                userhome = pwd.getpwuid(os.getuid()).pw_dir
++            except KeyError:
++                # bpo-10496: if the current user identifier doesn't exist in the
++                # password database, return the path unchanged
++                return path
++        else:
++            userhome = os.environ['HOME']
++    else:
++        try:
++            import pwd
++        except ImportError:
++            # pwd module unavailable, return path unchanged
++            return path
++        name = path[1:i]
++        if isinstance(name, bytes):
++            name = os.fsdecode(name)
++        try:
++            pwent = pwd.getpwnam(name)
++        except KeyError:
++            # bpo-10496: if the user name from the path doesn't exist in the
++            # password database, return the path unchanged
++            return path
++        userhome = pwent.pw_dir
++    # if no user home, return the path unchanged on VxWorks
++    if userhome is None and sys.platform == "vxworks":
++        return path
++    if isinstance(path, bytes):
++        userhome = os.fsencode(userhome)
++        root = b'/'
++    else:
++        root = '/'
++    userhome = userhome.rstrip(root)
++    return (userhome + path[i:]) or root
++
++
++# Expand paths containing shell variable substitutions.
++# This expands the forms $variable and ${variable} only.
++# Non-existent variables are left unchanged.
++
++_varpattern = r'\$(\w+|\{[^}]*\}?)'
++_varsub = None
++_varsubb = None
++
++def expandvars(path):
++    """Expand shell variables of form $var and ${var}.  Unknown variables
++    are left unchanged."""
++    path = os.fspath(path)
++    global _varsub, _varsubb
++    if isinstance(path, bytes):
++        if b'$' not in path:
++            return path
++        if not _varsubb:
++            import re
++            _varsubb = re.compile(_varpattern.encode(), re.ASCII).sub
++        sub = _varsubb
++        start = b'{'
++        end = b'}'
++        environ = getattr(os, 'environb', None)
++    else:
++        if '$' not in path:
++            return path
++        if not _varsub:
++            import re
++            _varsub = re.compile(_varpattern, re.ASCII).sub
++        sub = _varsub
++        start = '{'
++        end = '}'
++        environ = os.environ
++
++    def repl(m):
++        name = m[1]
++        if name.startswith(start):
++            if not name.endswith(end):
++                return m[0]
++            name = name[1:-1]
++        try:
++            if environ is None:
++                value = os.fsencode(os.environ[os.fsdecode(name)])
++            else:
++                value = environ[name]
++        except KeyError:
++            return m[0]
++        else:
++            return value
++
++    return sub(repl, path)
++
++
++# Normalize a path, e.g. A//B, A/./B and A/foo/../B all become A/B.
++# It should be understood that this may change the meaning of the path
++# if it contains symbolic links!
++
++def normpath(path):
++    """Normalize path, eliminating double slashes, etc."""
++    path = os.fspath(path)
++    if isinstance(path, bytes):
++        sep = b'/'
++        empty = b''
++        dot = b'.'
++        dotdot = b'..'
++    else:
++        sep = '/'
++        empty = ''
++        dot = '.'
++        dotdot = '..'
++    if path == empty:
++        return dot
++    drive, root, path = splitroot(path)
++    comps = path.split(sep)
++    new_comps = []
++    for comp in comps:
++        if comp in (empty, dot):
++            continue
++        if comp == dotdot:
++            if new_comps and new_comps[-1] != dotdot:
++                new_comps.pop()
++            elif drive or root:
++                # '..' above a device root (or '/') stays at the root.
++                continue
++            else:
++                new_comps.append(comp)
++        else:
++            new_comps.append(comp)
++    path = drive + root + sep.join(new_comps)
++    return path or dot
++
++
++def abspath(path):
++    """Return an absolute path."""
++    path = os.fspath(path)
++    if not isabs(path):
++        if isinstance(path, bytes):
++            cwd = os.getcwdb()
++        else:
++            cwd = os.getcwd()
++        path = join(cwd, path)
++    return normpath(path)
++
++
++# Return a canonical path (i.e. the absolute location of a file on the
++# filesystem).  The Vita filesystem has no symbolic links, so this is
++# abspath() plus the existence check that strict mode asks for.
++
++def realpath(filename, *, strict=False):
++    """Return the canonical path of the specified filename."""
++    filename = os.fspath(filename)
++    path = abspath(filename)
++    if strict is ALLOW_MISSING:
++        # Only a missing final file is allowed; the parent must exist.
++        parent = dirname(path)
++        if parent and parent != path:
++            os.stat(parent)
++    elif strict:
++        os.stat(path)  # Raises OSError if it does not exist.
++    return path
++
++
++supports_unicode_filenames = True
++
++def relpath(path, start=None):
++    """Return a relative version of a path"""
++
++    if not path:
++        raise ValueError("no path specified")
++
++    path = os.fspath(path)
++    if isinstance(path, bytes):
++        curdir = b'.'
++        sep = b'/'
++        pardir = b'..'
++    else:
++        curdir = '.'
++        sep = '/'
++        pardir = '..'
++
++    if start is None:
++        start = curdir
++    else:
++        start = os.fspath(start)
++
++    try:
++        start_abs = abspath(start)
++        path_abs = abspath(path)
++        start_drive, _, start_rest = splitroot(start_abs)
++        path_drive, _, path_rest = splitroot(path_abs)
++        if normcase(start_drive) != normcase(path_drive):
++            raise ValueError("path is on device %r, start on device %r"
++                             % (path_drive, start_drive))
++        start_list = [x for x in start_rest.split(sep) if x]
++        path_list = [x for x in path_rest.split(sep) if x]
++        # Work out how much of the filepath is shared by start and path.
++        i = 0
++        for e1, e2 in zip(start_list, path_list):
++            if normcase(e1) != normcase(e2):
++                break
++            i += 1
++
++        rel_list = [pardir] * (len(start_list)-i) + path_list[i:]
++        if not rel_list:
++            return curdir
++        return join(*rel_list)
++    except (TypeError, AttributeError, BytesWarning, DeprecationWarning):
++        genericpath._check_arg_types('relpath', path, start)
++        raise
++
++
++# Return the longest common sub-path of the sequence of paths given as input.
++# The paths are not normalized before comparing them (this is the
++# responsibility of the caller). Any trailing separator is stripped from the
++# returned path.
++
++def commonpath(paths):
++    """Given a sequence of path names, returns the longest common sub-path."""
++
++    if not paths:
++        raise ValueError('commonpath() arg is an empty sequence')
++
++    paths = tuple(map(os.fspath, paths))
++    if isinstance(paths[0], bytes):
++        sep = b'/'
++        curdir = b'.'
++    else:
++        sep = '/'
++        curdir = '.'
++
++    try:
++        drivesplits = [splitroot(p) for p in paths]
++        split_paths = [p.split(sep) for d, r, p in drivesplits]
++
++        try:
++            isabs, = set(bool(d or r) for d, r, p in drivesplits)
++        except ValueError:
++            raise ValueError("Can't mix absolute and relative paths") from None
++
++        if len(set(normcase(d) for d, r, p in drivesplits)) != 1:
++            raise ValueError("Paths don't have the same drive")
++
++        drive, root, path = splitroot(paths[0])
++        common = path.split(sep)
++        common = [c for c in common if c and c != curdir]
++
++        split_paths = [[c for c in s if c and c != curdir] for s in split_paths]
++        s1 = min(split_paths)
++        s2 = max(split_paths)
++        for i, c in enumerate(s1):
++            if c != s2[i]:
++                common = common[:i]
++                break
++        else:
++            common = common[:len(s1)]
++
++        return drive + root + sep.join(common)
++    except (TypeError, AttributeError):
++        genericpath._check_arg_types('commonpath', *paths)
++        raise
+diff --git a/build_vita.sh b/build_vita.sh
+new file mode 100644
+index 0000000..0c50711
+--- /dev/null
++++ b/build_vita.sh
+@@ -0,0 +1,76 @@
++#!/bin/sh
++# Summertime to Vita - CPython 3.12 for the PlayStation Vita
++# Vita port: Akurey (based on Grimiku's and SonicMastr's 3.11 port)
++#
++# Cross-compiles CPython and installs it into VitaSDK: headers in
++# include/python3.12, libpython3.12.a and the stdlib sources.
++# Run compile_modules_vita.sh afterwards to make lib/python312.zip.
++#
++# Needs: $VITASDK set with its bin/ on PATH, a host Python 3.12 (has to
++# match this tree's minor version), OpenSSL 1.1.1+ and zlib in VitaSDK.
++#
++# Usage: ./build_vita.sh [DESTDIR]
++set -e
++
++printf '\033[1;32mCPython 3.12 Vita Port\033[0m\n'
++
++if [ -z "$VITASDK" ]; then
++    echo "VITASDK is not set." >&2
++    exit 1
++fi
++
++if [ -z "$1" ]; then
++    PREFIX=$VITASDK/arm-vita-eabi
++else
++    PREFIX=$1/$VITASDK/arm-vita-eabi
++fi
++export PREFIX
++
++BUILD_PYTHON=${BUILD_PYTHON:-python3.12}
++if ! "$BUILD_PYTHON" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 12))'; then
++    echo "$BUILD_PYTHON must be Python 3.12 (set BUILD_PYTHON=...)." >&2
++    exit 1
++fi
++
++./configure \
++    --build="$(./config.guess)" \
++    --host=arm-vita-eabi \
++    --with-build-python="$BUILD_PYTHON" \
++    --prefix="$PREFIX" \
++    --disable-shared \
++    --disable-test-modules \
++    --disable-ipv6 \
++    --with-ensurepip=no \
++    --without-doc-strings \
++    --with-openssl="$VITASDK/arm-vita-eabi" \
++    CONFIG_SITE="config.site" \
++    CFLAGS="-O2 -Wl,-q,-z,nocopyreloc" \
++    CPPFLAGS="-Wl,-q,-z,nocopyreloc"
++
++make -j"$(nproc)"
++
++# Ren'Py imports all of these at startup or when saving/loading.  With
++# MODULE_BUILDTYPE=static every module that got built shows up in
++# Modules/config.c, so anything missing here was skipped by configure.
++REQUIRED="array binascii math select unicodedata zlib _bisect _heapq _json
++_pickle _queue _random _struct _datetime _contextvars _md5 _sha1 _sha2
++_blake2"
++missing=""
++for mod in $REQUIRED; do
++    grep -q "PyInit_${mod}(" Modules/config.c || missing="$missing $mod"
++done
++if [ -n "$missing" ]; then
++    echo "ERROR: configure skipped modules Ren'Py needs:$missing" >&2
++    echo "Look for 'checking for stdlib extension module' in config.log." >&2
++    exit 1
++fi
++
++make install
++
++# The static _decimal and _sha2 modules link against helper archives that
++# aren't part of libpython3.12.a, so install them for the eboot link.
++for lib in Modules/_decimal/libmpdec/libmpdec.a Modules/_hacl/libHacl_Hash_SHA2.a; do
++    if [ -f "$lib" ]; then
++        cp "$lib" "$PREFIX/lib/"
++    fi
++done
+diff --git a/compile_modules_vita.sh b/compile_modules_vita.sh
+new file mode 100644
+index 0000000..176c5ad
+--- /dev/null
++++ b/compile_modules_vita.sh
+@@ -0,0 +1,49 @@
++#!/bin/sh
++# Packs the installed CPython 3.12 stdlib into lib/python312.zip
++# (optimized bytecode only) and copies it into VitaSDK.
++#
++# Usage: ./compile_modules_vita.sh [DESTDIR]   (same DESTDIR as build_vita.sh)
++set -e
++
++printf '\033[1;32mCompiling Python Modules\033[0m\n'
++
++if [ -z "$1" ]; then
++    PREFIX=$VITASDK/arm-vita-eabi
++else
++    PREFIX=$1/$VITASDK/arm-vita-eabi
++fi
++export PREFIX
++
++BUILD_PYTHON=${BUILD_PYTHON:-python3.12}
++PYTHON_BUILD=python312-vita-build
++
++mkdir -p "$PYTHON_BUILD"
++rm -f "$PYTHON_BUILD/python312.zip"
++rm -rf "$PYTHON_BUILD/python3.12"
++cp -as "$PREFIX/lib/python3.12" "$PYTHON_BUILD"
++cd "$PYTHON_BUILD/python3.12"
++
++# Tests, tools, and modules whose C side isn't built for the Vita.
++rm -rf test idlelib tkinter turtledemo turtle.py ensurepip lib2to3 \
++       pydoc_data venv sqlite3 curses dbm \
++       config-3.12-* site-packages __phello__ __hello__.py
++find . -type d -name __pycache__ -prune -exec rm -rf {} +
++
++find . -type l -not -name '*.py' -delete
++find . -type d -empty -delete
++"$BUILD_PYTHON" -I -OO -m compileall -q -b .
++find . -type l -not -name '*.pyc' -delete
++find . -type d -empty -delete
++
++"$BUILD_PYTHON" - ../python312.zip <<'EOF'
++import os, sys, zipfile
++with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as z:
++    for root, dirs, files in os.walk("."):
++        dirs.sort()
++        for name in sorted(files):
++            path = os.path.join(root, name)
++            z.write(path, os.path.relpath(path, "."))
++EOF
++cd ..
++cp python312.zip "$PREFIX/lib/"
++echo "Installed $PREFIX/lib/python312.zip"
+diff --git a/config.site b/config.site
+new file mode 100644
+index 0000000..d179a88
+--- /dev/null
++++ b/config.site
+@@ -0,0 +1,60 @@
++# configure presets for the PlayStation Vita (arm-vita-eabi), CPython 3.12.
++# Used by build_vita.sh via CONFIG_SITE=config.site.
++
++# Cross-compiling: configure cannot probe the target's /dev.
++ac_cv_file__dev_ptmx=no
++ac_cv_file__dev_ptc=no
++
++# VitaSDK newlib declares some functions without prototypes, and leaves
++# some results unused; don't turn those into hard errors.
++ac_cv_enable_implicit_function_declaration_error=no
++ac_cv_disable_unused_result_warning=no
++
++# sys/resource.h exists but getrusage/setrlimit are not implemented.
++ac_cv_header_sys_resource_h=no
++
++# Found by the link test, but declared in sys/resource.h (disabled above),
++# and newer GCC rejects calls without a prototype.
++ac_cv_func_getpriority=no
++ac_cv_func_setpriority=no
++
++# Link every stdlib extension module into libpython3.12.a, the Vita can't
++# load shared objects.  (configure.ac: MODULE_BUILDTYPE=${MODULE_BUILDTYPE:-shared})
++MODULE_BUILDTYPE=static
++
++# Modules that can't work on the Vita (no processes, users, terminals,
++# dlopen/libffi or subinterpreters) or that Ren'Py never touches.
++# PY_STDLIB_MOD skips anything whose py_cv_module_* is already "n/a".
++py_cv_module__multiprocessing=n/a
++py_cv_module__posixsubprocess=n/a
++py_cv_module__posixshmem=n/a
++py_cv_module__ctypes=n/a
++py_cv_module__ctypes_test=n/a
++py_cv_module__crypt=n/a
++py_cv_module__curses=n/a
++py_cv_module__curses_panel=n/a
++py_cv_module__dbm=n/a
++py_cv_module__gdbm=n/a
++py_cv_module__lzma=n/a
++py_cv_module__bz2=n/a
++py_cv_module__scproxy=n/a
++py_cv_module__sqlite3=n/a
++py_cv_module__tkinter=n/a
++py_cv_module__uuid=n/a
++py_cv_module__xxsubinterpreters=n/a
++py_cv_module__xxinterpchannels=n/a
++py_cv_module__elementtree=n/a
++py_cv_module_pyexpat=n/a
++py_cv_module_grp=n/a
++py_cv_module_pwd=n/a
++py_cv_module_mmap=n/a
++py_cv_module_nis=n/a
++py_cv_module_ossaudiodev=n/a
++py_cv_module_readline=n/a
++py_cv_module_resource=n/a
++py_cv_module_spwd=n/a
++py_cv_module_syslog=n/a
++py_cv_module_termios=n/a
++py_cv_module_xxsubtype=n/a
++py_cv_module_xxlimited=n/a
++py_cv_module_xxlimited_35=n/a
+diff --git a/sample/CMakeLists.txt b/sample/CMakeLists.txt
+new file mode 100644
+index 0000000..26c5749
+--- /dev/null
++++ b/sample/CMakeLists.txt
+@@ -0,0 +1,56 @@
++cmake_minimum_required(VERSION 3.10)
++
++set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "VITASDK toolchain file")
++set(VITASDK_CMAKE_FILE "$ENV{VITASDK}/share/vita.cmake" CACHE PATH "VITASDK CMake functions file")
++include("${VITASDK_CMAKE_FILE}" REQUIRED)
++
++project(cpython312-vita-smoketest LANGUAGES C)
++
++include_directories(
++  "$ENV{VITASDK}/arm-vita-eabi/include/python3.12"
++)
++
++set(ELF "smoketest.elf")
++
++find_package(OpenSSL REQUIRED)
++
++add_executable("${ELF}"
++  main.c
++)
++
++# build_vita.sh installs libmpdec and libHacl_Hash_SHA2 next to
++# libpython3.12.a, the static _decimal and _sha2 modules need them.
++target_link_libraries("${ELF}"
++  python3.12
++  mpdec
++  Hacl_Hash_SHA2
++  intl
++  SceIofilemgr_stub
++  SceAppMgr_stub
++  SceNet_stub
++  SceNetCtl_stub
++  SceSsl_stub
++  SceSysmodule_stub
++  SceLibKernel_stub
++  ${OPENSSL_LIBRARIES}
++  pthread
++  z
++  m
++)
++
++vita_create_self(eboot.bin
++  "${ELF}"
++  UNSAFE
++)
++
++set(VPK "cpython-312-smoketest.vpk")
++set(TITLE_NAME "Summertime to Vita - Python Test")
++set(TITLE_ID "PYTH00312")
++set(TITLE_VER "01.00")
++
++vita_create_vpk("${VPK}" "${TITLE_ID}" eboot.bin
++  NAME "${TITLE_NAME}"
++  VERSION "${TITLE_VER}"
++  FILE "$ENV{VITASDK}/arm-vita-eabi/lib/python312.zip" lib/python312.zip
++  FILE main.py main.py
++)
+diff --git a/sample/main.c b/sample/main.c
+new file mode 100644
+index 0000000..22dc744
+--- /dev/null
++++ b/sample/main.c
+@@ -0,0 +1,68 @@
++/*
++ * CPython 3.12 smoke test for the PlayStation Vita.
++ *
++ * Starts the interpreter the same way the Ren'Py launcher will (home is
++ * the app directory, stdlib in lib/python312.zip) and runs main.py, which
++ * checks the parts Ren'Py relies on.  Results go to stdout and to
++ * ux0:data/python312-test.txt.
++ */
++#include <stdio.h>
++#include <stdlib.h>
++#include <Python.h>
++#include <psp2/appmgr.h>
++#include <psp2/kernel/processmgr.h>
++
++int _newlib_heap_size_user = 100 * 1024 * 1024;
++/* The interpreter runs on the main thread, leave room for
++   C_RECURSION_LIMIT (1000) levels of C recursion. */
++unsigned int sceUserMainThreadStackSize = 2 * 1024 * 1024;
++
++#define APP_DIR "ux0:app/PYTH00312"
++
++static int fail(PyStatus status, PyConfig *config) {
++    PyConfig_Clear(config);
++    if (PyStatus_IsExit(status)) {
++        return status.exitcode;
++    }
++    Py_ExitStatusException(status);
++    return 1;
++}
++
++int main(int argc, char *argv[]) {
++    (void)argc;
++    (void)argv;
++
++    sceAppMgrUmount("app0:");
++
++    PyStatus status;
++    PyConfig config;
++    PyConfig_InitPythonConfig(&config);
++
++    config.site_import = 0;
++    config.optimization_level = 2;
++    config.write_bytecode = 0;
++    config.user_site_directory = 0;
++    config.buffered_stdio = 0;
++
++    status = PyConfig_SetBytesString(&config, &config.home, APP_DIR);
++    if (PyStatus_Exception(status)) return fail(status, &config);
++
++    status = PyConfig_SetBytesString(&config, &config.program_name, APP_DIR "/eboot.bin");
++    if (PyStatus_Exception(status)) return fail(status, &config);
++
++    status = Py_InitializeFromConfig(&config);
++    if (PyStatus_Exception(status)) return fail(status, &config);
++    PyConfig_Clear(&config);
++
++    FILE *fp = fopen(APP_DIR "/main.py", "r");
++    if (fp == NULL) {
++        printf("Could not open main.py\n");
++        Py_Finalize();
++        return 1;
++    }
++
++    int rc = PyRun_SimpleFileEx(fp, APP_DIR "/main.py", 1);
++    Py_Finalize();
++    sceKernelExitProcess(rc);
++    return rc;
++}
+diff --git a/sample/main.py b/sample/main.py
+new file mode 100644
+index 0000000..d46bd38
+--- /dev/null
++++ b/sample/main.py
+@@ -0,0 +1,122 @@
++# CPython 3.12 Vita smoke test.  Runs the things Ren'Py needs from the
++# interpreter, prints PASS/FAIL for each and writes the results to
++# ux0:data/python312-test.txt so they can be read without a console.
++
++import sys
++import traceback
++
++results = []
++
++
++def check(name):
++    def wrap(fn):
++        try:
++            detail = fn()
++            results.append("PASS %s%s" % (name, (": %s" % detail) if detail else ""))
++        except Exception:
++            results.append("FAIL %s\n%s" % (name, traceback.format_exc()))
++        print(results[-1])
++        return fn
++    return wrap
++
++
++@check("platform")
++def _():
++    import os
++    assert sys.platform == "vita", sys.platform
++    assert os.name == "posix", os.name
++    assert os.path.__name__ == "vitapath", os.path.__name__
++    return "%s, %s" % (sys.version.split()[0], sys.path)
++
++
++@check("vitapath")
++def _():
++    import os.path as p
++    assert p.isabs("ux0:/data") and not p.isabs("data/x")
++    assert p.join("ux0:/data", "a", "b.txt") == "ux0:/data/a/b.txt"
++    assert p.normpath("ux0:/data/../app/./x") == "ux0:/app/x"
++    assert p.dirname("ux0:/data/x.txt") == "ux0:/data"
++    assert p.splitroot("ux0:/data/x") == ("ux0:", "/", "data/x")
++
++
++@check("pathlib")
++def _():
++    from pathlib import PurePath
++    pp = PurePath("ux0:/data/game/script.rpy")
++    assert pp.is_absolute(), pp
++    assert pp.name == "script.rpy" and pp.suffix == ".rpy"
++    assert str(pp.parent) == "ux0:/data/game", str(pp.parent)
++
++
++@check("file io")
++def _():
++    import os
++    os.makedirs("ux0:data/python312-tmp", exist_ok=True)
++    fn = "ux0:data/python312-tmp/test.bin"
++    with open(fn, "wb") as f:
++        f.write(b"x" * 100000)
++    assert os.path.getsize(fn) == 100000
++    names = os.listdir("ux0:data/python312-tmp")
++    entries = [e.name for e in os.scandir("ux0:data/python312-tmp")]
++    os.replace(fn, fn + ".2")
++    os.remove(fn + ".2")
++    os.rmdir("ux0:data/python312-tmp")
++    return "%s %s" % (names, entries)
++
++
++@check("stdlib modules")
++def _():
++    import array, binascii, bisect, collections, datetime, functools, hashlib
++    import heapq, io, itertools, json, math, pickle, queue, random, re
++    import struct, threading, time, unicodedata, weakref, zlib, zipfile
++    hashlib.md5(b"a").hexdigest()
++    hashlib.sha256(b"a").hexdigest()
++    hashlib.blake2b(b"a").hexdigest()
++    assert zlib.decompress(zlib.compress(b"renpy" * 100)) == b"renpy" * 100
++    assert unicodedata.category("a") == "Ll"
++    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
++
++
++@check("deep pickle on a thread")
++def _():
++    # Ren'Py autosaves from a background thread, so this has to fit in the
++    # 1 MiB thread stack with the Vita's C_RECURSION_LIMIT of 1000.
++    import pickle, threading
++    out = {}
++
++    def work():
++        node = None
++        for i in range(400):
++            node = [i, node]
++        out["size"] = len(pickle.dumps(node, protocol=pickle.HIGHEST_PROTOCOL))
++        deeper = None
++        for i in range(5000):
++            deeper = [deeper]
++        try:
++            pickle.dumps(deeper)
++            out["deep"] = "no error"
++        except RecursionError:
++            out["deep"] = "RecursionError (expected)"
++
++    t = threading.Thread(target=work)
++    t.start()
++    t.join()
++    assert "size" in out, "thread crashed"
++    return "%d bytes, %s" % (out["size"], out["deep"])
++
++
++@check("zipimport")
++def _():
++    import zipimport
++    assert any(p.endswith(".zip") for p in sys.path), sys.path
++
++
++try:
++    with open("ux0:data/python312-test.txt", "w") as f:
++        f.write("\n".join(results) + "\n")
++except Exception:
++    traceback.print_exc()
++
++failed = sum(1 for r in results if r.startswith("FAIL"))
++print("%d checks, %d failed" % (len(results), failed))
++sys.exit(1 if failed else 0)

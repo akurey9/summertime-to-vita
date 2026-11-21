@@ -1,0 +1,33 @@
+# Build output
+renpy-vita/build/
+renpy-vita/tmp_build/
+renpy-vita/DistributionTool/
+*.vpk
+*.elf
+*.velf
+eboot.bin
+
+# Generated Ren'Py sources and caches
+renpy-8/tmp/
+__pycache__/
+*.pyc
+*.pyo
+*.rpyc
+*.rpymc
+*.rpyb
+
+# CPython checkout made by cpython/build.sh
+cpython/cpython-src/
+
+# Game data and logs never go in the repository
+*.apk
+*.rpa
+out/
+py3_fixes.json
+vita_lazy_scripts.json
+vita_init/
+log.txt
+profile.txt
+freeze.txt
+traceback.txt
+boot.log
