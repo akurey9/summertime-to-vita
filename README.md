@@ -2,7 +2,7 @@
 
 A custom PlayStation Vita port of the Ren'Py runtime made to run **Summertime Saga
 0.20.16**. It's Ren'Py 8.5 on CPython 3.12, drawing with vitaGL, built as a
-native Vita application.
+native PS Vita application.
 
 ## What's in here
 
