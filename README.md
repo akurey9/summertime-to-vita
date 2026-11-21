@@ -6,7 +6,7 @@ native PS Vita application.
 
 ## What's in here
 
-| Folder | What it is |
+| Folder | |
 |---|---|
 | `renpy-vita/` | The Vita application: `main.c`, the CMake project and `all_in_one.bash`, which builds `eboot.bin` and the VPK. |
 | `renpy-8/` | Ren'Py 8.5.3 with the Vita changes (memory, loading, input, rendering, Python 2 compatibility for the game's scripts). Engine sources only. |
@@ -14,16 +14,6 @@ native PS Vita application.
 | `tools/` | Turns the game's APK into the Vita game folder, crops and repacks its art, converts its Python 2 snippets, and holds the Vita button layout. |
 
 See [BUILDING.md](BUILDING.md) for the details.
-
-## Building the .vpk file
-
-1. Put `libshacccg.suprx` in `ur0:data/` (vitaGL compiles shaders with it;
-   see the [extraction guide](https://cimmerian.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx)).
-2. Copy the prepared game folder to `ux0:data/SummertimeSaga/`.
-3. Install `summertime-to-vita.vpk` with VitaShell.
-
-The first start builds Ren'Py's caches and compiles shaders, so it's slower
-than the next ones.
 
 ## Controls
 
