@@ -1,5 +1,4 @@
-![Uploading 2026-11-21-112949-025575.png…]()
-
+<img width="960" height="544" alt="2026-11-21-112949-025575" src="https://github.com/user-attachments/assets/54058229-f09a-4870-958d-6e8c22ff45c3" />
 
 # Summertime to Vita
 
@@ -38,6 +37,7 @@ Ported by Akurey. This builds on a lot of other people's work; see
 [CREDITS.md](CREDITS.md).
 
 SonicMastr's Ren'py Vita: https://github.com/SonicMastr/renpy-vita
+
 Grimiku's Ren'py 8 Vita: https://github.com/Grimiku/RenPy-Vita-8
 
 Summertime Saga is made by Kompas Productions. This project isn't affiliated
