@@ -13,19 +13,9 @@ native PS Vita application.
 | `cpython/` | A patch for CPython 3.12.16 that makes it build and run on the Vita, and a script that applies it and installs Python into VitaSDK. |
 | `tools/` | Turns the game's APK into the Vita game folder, crops and repacks its art, converts its Python 2 snippets, and holds the Vita button layout. |
 
-## How it fits together
-
-1. CPython 3.12 is cross-compiled for the Vita and installed into VitaSDK
-   (`libpython3.12.a`, headers, `python312.zip`).
-2. Ren'Py's Cython modules are turned into C and compiled straight into
-   `eboot.bin`, together with Python, SDL2, vitaGL, FFmpeg, FreeType and the
-   rest. The Vita can't load shared libraries, so everything is static.
-3. The VPK only carries the runtime (about 18MB). The game's files go to
-   `ux0:data/SummertimeSaga/`, so a new build installs in seconds.
-
 See [BUILDING.md](BUILDING.md) for the details.
 
-## Installing a build
+## Building the .vpk file
 
 1. Put `libshacccg.suprx` in `ur0:data/` (vitaGL compiles shaders with it;
    see the [extraction guide](https://cimmerian.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx)).
