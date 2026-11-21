@@ -1,14 +1,8 @@
 # Summertime to Vita
 
-A PlayStation Vita port of the Ren'Py runtime that runs **Summertime Saga
+A custom PlayStation Vita port of the Ren'Py runtime made to run **Summertime Saga
 0.20.16**. It's Ren'Py 8.5 on CPython 3.12, drawing with vitaGL, built as a
 native Vita application.
-
-This repository only has the engine side: the launcher, the Vita build of
-Ren'Py, the CPython patch and the tools that turn the game's Android release
-into something the Vita can load. **The game itself is not included.** You
-need your own copy of the Summertime Saga 0.20.16 Android release to build the
-game files.
 
 ## What's in here
 
