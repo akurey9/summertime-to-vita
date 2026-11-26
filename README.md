@@ -6,6 +6,8 @@ A custom PlayStation Vita port of the Ren'Py runtime made to run **Summertime Sa
 0.20.16**. It's Ren'Py 8.5 on CPython 3.12, drawing with vitaGL, built as a
 native PS Vita application. (BASED ON SONICMASTR'S REN'PY VITA AND GRIMIKU'S REN'PY 8 VITA)
 
+This project CONTAINS USE OF AI-ASSISTANCE.
+
 ## What's in here
 
 | Folder | |
